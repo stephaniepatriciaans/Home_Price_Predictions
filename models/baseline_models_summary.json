@@ -1,0 +1,20 @@
+{
+  "linear": {
+    "model": "LinearRegression (low-card OHE)",
+    "R2": -1514.600267064881,
+    "MAE": 561633.7290109873,
+    "RMSE": 39105050.8602662,
+    "n_train": 24000,
+    "n_test": 6000,
+    "n_features_out_linear": 1
+  },
+  "random_forest": {
+    "model": "RandomForest (ordinal cats)",
+    "R2": 0.9888580348750143,
+    "MAE": 52833.71550746091,
+    "RMSE": 106028.20665643328,
+    "n_train": 24000,
+    "n_test": 6000,
+    "n_features_out_linear": 1
+  }
+}
