@@ -1,20 +1,18 @@
 {
-  "linear": {
-    "model": "LinearRegression (low-card OHE)",
-    "R2": -1514.600267064881,
-    "MAE": 561633.7290109873,
-    "RMSE": 39105050.8602662,
-    "n_train": 24000,
-    "n_test": 6000,
-    "n_features_out_linear": 1
+  "ridge": {
+    "Model": "Ridge (low-card OHE, sparse)",
+    "R2": 0.9768107763609407,
+    "MAE": 60229.45705877891,
+    "RMSE": 156078.91895798314,
+    "n_train": 32000,
+    "n_test": 8000
   },
   "random_forest": {
-    "model": "RandomForest (ordinal cats)",
-    "R2": 0.9888580348750143,
-    "MAE": 52833.71550746091,
-    "RMSE": 106028.20665643328,
-    "n_train": 24000,
-    "n_test": 6000,
-    "n_features_out_linear": 1
+    "Model": "RandomForest (ordinal cats)",
+    "R2": 0.9737228998348273,
+    "MAE": 65298.88908690046,
+    "RMSE": 166145.9893423664,
+    "n_train": 32000,
+    "n_test": 8000
   }
 }
