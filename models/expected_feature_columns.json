@@ -68,5 +68,9 @@
   "AssociationFee",
   "LotSizeSquareFeet",
   "MiddleOrJuniorSchoolDistrict",
-  "PricePerSqft"
+  "PricePerSqft",
+  "ListPricePerSqft",
+  "LP_to_SP_Ratio",
+  "PriceDelta",
+  "PricePctDiff"
 ]
