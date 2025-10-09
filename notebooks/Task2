@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-# --- sklearn & scipy imports
+# setup --> sklearn & scipy imports
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -28,17 +28,20 @@ from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
 from scipy.stats import loguniform, randint
 
-# --- persistence & plotting
+# setup --> persistence & plotting
 import joblib
 import matplotlib.pyplot as plt
 from sklearn import tree
 
+
+
 # =========================
 # 1) Load the cleaned data
 # =========================
-# Prefer ../data when running from a notebook in /notebooks; fallback to ./data when running locally.
 csv_path = "../data/cleaned_enhanced.csv" if Path("../data/cleaned_enhanced.csv").exists() else "data/cleaned_enhanced.csv"
 df = pd.read_csv(csv_path)
+
+
 
 # ===============================
 # 2) Resolve target & split X / y
@@ -81,6 +84,8 @@ with open(models_path / "expected_feature_columns.json", "w") as f:
     json.dump(X_train.columns.tolist(), f, indent=2)
 print(f"Saved expected columns → {models_path / 'expected_feature_columns.json'}")
 
+
+
 # ===================================
 # 3) Column partitions (num / cat)
 # ===================================
@@ -92,11 +97,13 @@ CARD_LIMIT = 80
 cat_low  = [c for c in cat_cols if X_train[c].nunique(dropna=True) <= CARD_LIMIT]
 # High-cardinality categorical features are dropped in the Ridge path (kept in RF via ordinal encoding).
 
+
+
 # ===================================
 # 4) Preprocessors for each model
 # ===================================
 # Ridge: numeric + OHE for low-card cats; keep it sparse for efficiency.
-# NOTE: If you're on scikit-learn >= 1.4, prefer sparse_output=True (sparse is deprecated).
+# NOTE: If I am on scikit-learn >= 1.4, prefer sparse_output=True (sparse is deprecated).
 pre_ridge = ColumnTransformer(
     transformers=[
         ("num", SimpleImputer(strategy="median"), num_cols),
@@ -119,6 +126,8 @@ pre_rf = ColumnTransformer(
     ],
     remainder="drop"
 )
+
+
 
 # ================================
 # 5) Models & randomized tuning
@@ -160,6 +169,8 @@ rf_search.fit(X_train, y_train)
 rf_tuned = rf_search.best_estimator_
 print("Best RF params:", rf_search.best_params_)
 
+
+
 # =====================================
 # 6) Metrics helpers + evaluation
 # =====================================
@@ -191,7 +202,7 @@ rf_m    = eval_pipe("RandomForest (tuned)", rf_tuned)
 # Rank by R² (desc) then RMSE (asc)
 res_df = pd.DataFrame([ridge_m, rf_m]).sort_values(["R2", "RMSE"], ascending=[False, True])
 
-# Pretty table in notebook environments
+# Clean table in notebook environments
 try:
     display(res_df.style.format({
         "R2": "{:.4f}", "MAE": "{:,.0f}", "RMSE": "{:,.0f}", "MdAPE (%)": "{:.2f}"
@@ -204,6 +215,8 @@ print("\n=== Test Metrics Summary ===")
 for row in res_df.to_dict(orient="records"):
     print(f"{row['Model']}: R2={row['R2']:.4f}, RMSE=${row['RMSE']:,.0f}, "
           f"MAE=${row['MAE']:,.0f}, MdAPE={row['MdAPE (%)']:.2f}% (n={row['n_test']})")
+
+
 
 # =========================================
 # 7) Persist results + best tuned pipeline
@@ -219,6 +232,8 @@ best_pipe = ridge_tuned if "Ridge" in best_name else rf_tuned
 joblib.dump(best_pipe, models_path / "best_model.joblib")
 print(f"Winner → {best_name}")
 print("Saved:", (models_path / "best_model.joblib").resolve())
+
+
 
 # ==================================================
 # 8) Random Forest internals & feature importance
@@ -243,7 +258,7 @@ tree.plot_tree(
 plt.title("Random Forest — Example Decision Tree (Depth ≤ 3)")
 plt.show()
 
-# === Feature importance extraction and safety guard ===
+# Feature importance extraction and safety guard 
 importances = rf_model.feature_importances_
 
 # Try to extract proper column names from the RF preprocessor
@@ -278,6 +293,8 @@ for i in range(min(10, len(importances))):
 print("Sum of importances:", importances.sum())
 
 
+
+
 # ==========================
 # 9) Predict API (one row)
 # ==========================
@@ -309,10 +326,11 @@ example_house = {
 price = predict_price(example_house)
 print(f"\nPredicted Close Price (example): ${price:,.0f}")
 
+
+
 # ==========================================================
-# 10) Optional: Holdout evaluation for Aug 2025 (if present)
+# 10) Holdout evaluation for Aug 2025 (if present)
 # ==========================================================
-# This runs only if your dataset has a usable month field and includes Aug 2025 rows.
 df_all = pd.read_csv(csv_path)
 
 target = next((c for c in target_candidates if c in df_all.columns), None)
