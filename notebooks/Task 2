@@ -552,7 +552,7 @@ if date_col is not None:
             rmse_aug = mean_squared_error(y_aug, y_aug_pred, squared=False)
             mdape_aug = mdape(y_aug, y_aug_pred)
             
-            print("\n📊 August 2025 Performance:")
+            print("\nAugust 2025 Performance:")
             print(f"R²: {r2_aug:.4f}")
             print(f"MAE: ${mae_aug:,.0f}")
             print(f"RMSE: ${rmse_aug:,.0f}")
