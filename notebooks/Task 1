@@ -1,0 +1,213 @@
+from pathlib import Path
+import pandas as pd
+import numpy as np
+import glob
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+data_path = Path("../data")
+
+csv_files = glob.glob(str(data_path / "CRMLSSold*.csv"))
+print("Found CSVs:", [Path(f).name for f in csv_files])
+
+if not csv_files:
+    raise FileNotFoundError(f"No CRMLSSold*.csv files found in {data_path.resolve()}")
+
+# Merge all monthly CRMLS datasets
+df_list = [pd.read_csv(f) for f in csv_files]
+df_all_raw = pd.concat(df_list, ignore_index=True)
+print("Merged shape:", df_all_raw.shape)
+
+# Save merged dataset
+output_path = data_path / "all_raw.csv"
+df_all_raw.to_csv(output_path, index=False)
+print(f"Saved merged dataset → {output_path}")
+
+df_all = df_all_raw.copy()
+
+# Filter to single-family residential
+if {"PropertyType", "PropertySubType"}.issubset(df_all.columns):
+    df_all["PropertySubType"] = df_all["PropertySubType"].astype(str)
+    mask_pt = df_all["PropertyType"].str.contains("residential", case=False, na=False)
+    mask_ps = df_all["PropertySubType"].str.contains("single", case=False, na=False)
+    df_all = df_all[mask_pt & mask_ps]
+
+# Resolve target (Close Price)
+target_candidates = ["ClosePrice", "Close Price", "Close_Price", "CLOSEPRICE"]
+target = next((c for c in target_candidates if c in df_all.columns), None)
+assert target is not None, f"Target not found. Tried: {target_candidates}"
+
+# Resolve ListPrice column names
+listprice_candidates = ["ListPrice", "List Price", "List_Price", "LISTPRICE"]
+lp = next((c for c in listprice_candidates if c in df_all.columns), None)
+
+orig_lp_candidates = ["OriginalListPrice", "Original List Price", "Original_List_Price", "ORIGINALLISTPRICE"]
+orig_lp = next((c for c in orig_lp_candidates if c in df_all.columns), None)
+
+# Convert to numeric
+if lp:
+    df_all[lp] = pd.to_numeric(df_all[lp], errors="coerce")
+if orig_lp:
+    df_all[orig_lp] = pd.to_numeric(df_all[orig_lp], errors="coerce")
+
+# Keep reasonable target range & non-null
+df_all = df_all[df_all[target].between(50_000, 10_000_000)]
+df_all = df_all.dropna(subset=[target])
+print("After removing outliers & NaNs:", df_all.shape)
+
+LOW, HIGH = 50_000, 10_000_000
+n0 = len(df_all)
+df_all = df_all[df_all[target].between(LOW, HIGH)]
+print(f"Trimmed extreme {target} values: {n0 - len(df_all)} rows removed "
+      f"(kept in [{LOW:,} .. {HIGH:,}])")
+
+# Bound ListPrice similarly but don't drop rows—just null implausible
+if lp:
+    n_before = df_all[lp].notna().sum()
+    df_all.loc[~df_all[lp].between(LOW, HIGH), lp] = np.nan
+    print(f"ListPrice: set {n_before - df_all[lp].notna().sum()} extreme values to NaN")
+
+# Resolve living area column
+living_candidates = ["LivingArea", "Living Area", "SQFT", "SquareFootage", "Square_Footage"]
+living = next((c for c in living_candidates if c in df_all.columns), None)
+
+# ==============================================================
+# SAFE FEATURE ENGINEERING (Non-leakage features for modeling)
+# ==============================================================
+# These features can be created because they don't use ClosePrice
+
+# 1. ListPrice per sqft (uses ListPrice, not ClosePrice - available at listing time)
+if lp and living:
+    df_all["ListPricePerSqft"] = df_all[lp] / df_all[living].clip(lower=1)
+    df_all["ListPricePerSqft"].replace([np.inf, -np.inf], np.nan, inplace=True)
+    p99_lp_psf = df_all["ListPricePerSqft"].quantile(0.99)
+    df_all["ListPricePerSqft"] = df_all["ListPricePerSqft"].clip(upper=p99_lp_psf)
+    print(f"✓ Created ListPricePerSqft (99th percentile: {p99_lp_psf:.2f})")
+
+# 2. Price reduction indicator (if OriginalListPrice differs from current ListPrice)
+if lp and orig_lp:
+    df_all["PriceReduced"] = (df_all[orig_lp] > df_all[lp]).astype(int)
+    df_all["PriceReductionAmt"] = (df_all[orig_lp] - df_all[lp]).clip(lower=0)
+    df_all["PriceReductionPct"] = (df_all["PriceReductionAmt"] / df_all[orig_lp]).replace([np.inf, -np.inf], np.nan)
+    print(f"✓ Created price reduction features")
+
+# 3. Age of property at listing (if YearBuilt exists)
+year_built_candidates = ["YearBuilt", "Year Built", "Year_Built", "YEARBUILT"]
+year_built = next((c for c in year_built_candidates if c in df_all.columns), None)
+
+if year_built:
+    df_all["PropertyAge"] = pd.Timestamp.now().year - pd.to_numeric(df_all[year_built], errors="coerce")
+    df_all["PropertyAge"] = df_all["PropertyAge"].clip(lower=0, upper=200)
+    print(f"✓ Created PropertyAge")
+
+# ==============================================================
+# ANALYSIS-ONLY FEATURES (These use ClosePrice - for EDA only!)
+# Create a separate dataframe for analysis
+# ==============================================================
+df_analysis = df_all.copy()
+
+# These features are ONLY for analysis, not for modeling
+if living:
+    df_analysis["PricePerSqft_ANALYSIS"] = df_analysis[target] / df_analysis[living].clip(lower=1)
+    df_analysis["PricePerSqft_ANALYSIS"] = df_analysis["PricePerSqft_ANALYSIS"].clip(
+        upper=df_analysis["PricePerSqft_ANALYSIS"].quantile(0.99)
+    )
+    print(f"✓ Created PricePerSqft_ANALYSIS (for EDA only)")
+
+if lp:
+    df_analysis["LP_to_SP_Ratio_ANALYSIS"] = df_analysis[target] / df_analysis[lp]
+    df_analysis["PriceDelta_ANALYSIS"] = df_analysis[target] - df_analysis[lp]
+    df_analysis["PricePctDiff_ANALYSIS"] = (
+        df_analysis["PriceDelta_ANALYSIS"] / df_analysis[lp]
+    ).replace([np.inf, -np.inf], np.nan)
+    print(f"✓ Created deal metrics (for EDA only)")
+
+# ==============================================================
+# Save cleaned datasets
+# ==============================================================
+# 1. Modeling dataset (no leakage features)
+df_clean = df_all.reset_index(drop=True)
+output_file = data_path / "cleaned_enhanced.csv"
+df_clean.to_csv(output_file, index=False)
+print(f"\n✓ Saved MODELING dataset → {output_file} | Shape: {df_clean.shape}")
+
+# 2. Analysis dataset (includes leakage features for EDA)
+df_analysis = df_analysis.reset_index(drop=True)
+analysis_file = data_path / "analysis_with_target_features.csv"
+df_analysis.to_csv(analysis_file, index=False)
+print(f"✓ Saved ANALYSIS dataset → {analysis_file} | Shape: {df_analysis.shape}")
+
+print("\n📊 Summary:")
+print(f"  - Modeling dataset: {df_clean.shape[0]} rows, {df_clean.shape[1]} columns")
+print(f"  - Analysis dataset: {df_analysis.shape[0]} rows, {df_analysis.shape[1]} columns")
+print(f"  - Analysis has {df_analysis.shape[1] - df_clean.shape[1]} extra columns (target-derived)")
+
+# Missingness (on the modeling dataset)
+missing_pct = (
+    df_clean.isna().mean().sort_values(ascending=False).mul(100).round(1)
+)
+miss_tbl = missing_pct[missing_pct > 0].head(15).to_frame("Missing %")
+print("\nTop 15 columns with missing values:")
+display(miss_tbl)
+
+# ==================== PLOTS (using analysis dataset) ====================
+
+# Distribution of Close Prices
+plt.figure(figsize=(8,5))
+ax = sns.histplot(df_analysis[target], bins=50, kde=True, color="blue")
+for line in ax.lines:
+    line.set_color("red")
+    line.set_linewidth(2)
+plt.title("Distribution of Close Prices")
+plt.xlabel("Close Price ($)")
+plt.ylabel("Count")
+plt.show()
+
+# Living Area vs Close Price
+x_col = living if living else "LivingArea"
+if x_col in df_analysis.columns:
+    plt.figure(figsize=(8,5))
+    sns.scatterplot(x=x_col, y=target, data=df_analysis, alpha=0.3)
+    plt.title(f"{x_col} vs {target}")
+    plt.xlabel(f"{x_col} (sqft)")
+    plt.ylabel(f"{target} ($)")
+    plt.show()
+
+# List Price vs Close Price (using analysis dataset)
+if lp:
+    plt.figure(figsize=(8,5))
+    sns.scatterplot(x=df_analysis[lp], y=df_analysis[target], alpha=0.3)
+    plt.title("List Price vs Close Price")
+    plt.xlabel("List Price ($)")
+    plt.ylabel("Close Price ($)")
+    plt.plot(
+        [df_analysis[lp].min(), df_analysis[lp].max()],
+        [df_analysis[lp].min(), df_analysis[lp].max()],
+        linestyle="--", linewidth=1, color="gray", label="1:1 line"
+    )
+    plt.legend()
+    plt.show()
+
+    # LP-to-SP Ratio (using analysis dataset)
+    if "LP_to_SP_Ratio_ANALYSIS" in df_analysis.columns:
+        plt.figure(figsize=(8,5))
+        sns.histplot(df_analysis["LP_to_SP_Ratio_ANALYSIS"].dropna(), bins=50, kde=True)
+        plt.title("LP-to-SP Ratio (ClosePrice / ListPrice)")
+        plt.xlabel("Ratio")
+        plt.ylabel("Count")
+        plt.axvline(x=1.0, color='red', linestyle='--', label='1.0 (List = Sale)')
+        plt.legend()
+        plt.show()
+
+# Price Per Sqft distribution (using analysis dataset)
+if "PricePerSqft_ANALYSIS" in df_analysis.columns:
+    plt.figure(figsize=(8,5))
+    sns.histplot(df_analysis["PricePerSqft_ANALYSIS"].dropna(), bins=50, kde=True)
+    plt.title("Distribution of Price Per Sqft (Closed Sales)")
+    plt.xlabel("Price Per Sqft ($)")
+    plt.ylabel("Count")
+    plt.show()
+
+print("\n✅ Task 1 Complete!")
+print("⚠️  Remember: Use 'cleaned_enhanced.csv' for modeling (no leakage)")
+print("📈 Use 'analysis_with_target_features.csv' for exploratory analysis only")

@@ -1,0 +1,584 @@
+# ================================================
+# Home Price Modeling - REVISED (Leakage Fixed)
+# ================================================
+# KEY FIXES:
+# 1. Time-based split instead of random split
+# 2. Explicit removal of ListPrice and derived features
+# 3. Removal of high-cardinality identifiers
+# 4. Proper temporal holdout for August 2025
+# ================================================
+
+import warnings, json, math
+warnings.filterwarnings("ignore")
+
+import numpy as np
+import pandas as pd
+from pathlib import Path
+
+from sklearn.model_selection import RandomizedSearchCV
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from sklearn.linear_model import Ridge
+from sklearn.ensemble import RandomForestRegressor
+from scipy.stats import loguniform, randint
+
+import joblib
+import matplotlib.pyplot as plt
+from sklearn import tree
+from sklearn.tree import export_text
+
+
+# =========================
+# 1) Load the cleaned data
+# =========================
+csv_path = "../data/cleaned_enhanced.csv" if Path("../data/cleaned_enhanced.csv").exists() else "data/cleaned_enhanced.csv"
+df = pd.read_csv(csv_path)
+
+print(f"Original dataset shape: {df.shape}")
+
+
+# ===============================
+# 2) Resolve target column
+# ===============================
+target_candidates = ["ClosePrice", "Close Price", "Close_Price", "CLOSEPRICE"]
+target = next((c for c in target_candidates if c in df.columns), None)
+assert target is not None, "Target column not found in cleaned_enhanced.csv"
+
+y_all = pd.to_numeric(df[target], errors="coerce")
+
+
+# ===============================
+# 3) CRITICAL: Remove leakage features FIRST
+# ===============================
+print("\n=== Removing Leakage Features ===")
+
+# List-related leakage (directly correlated with close price)
+LEAKAGE_LIST_FEATURES = [
+    "ListPrice", "List Price", "List_Price", "LISTPRICE",
+    "ListPricePerSqft", "ListPricePerSqFt", "List_Price_Per_SqFt",
+    "OriginalListPrice", "Original List Price", "Original_List_Price",
+    "LP_to_SP_Ratio", "PriceDelta", "PricePctDiff",
+    "SaleToListRatio", "SPLP", "SP_LP_Ratio",
+    "ListPriceLow", "ListPriceHigh"
+]
+
+# Date/temporal leakage (info not available before sale)
+LEAKAGE_DATE_FEATURES = [
+    "CloseDate", "Close Date", "Close_Date", "CLOSEDATE",
+    "CloseOfEscrowDate", "COEDate", "COE",
+    "ModificationTimestamp", "ContractDate", "ListingContractDate",
+    "DaysOnMarket", "DOM", "CDOM", "CumulativeDaysOnMarket",
+    "RecordingDate", "PurchaseContractDate"
+]
+
+# High-cardinality identifiers (enable memorization)
+LEAKAGE_IDS = [
+    "ListingKey", "ListingId", "ListingID", "L_ListingID", 
+    "Matrix_Unique_ID", "UniversalPropertyId", "L_DisplayId",
+    "MLSNumber", "MLS#", "MLS_Number",
+    "Address", "StreetAddress", "UnparsedAddress",
+    "StreetName", "StreetNumber", "StreetDirPrefix", "StreetDirSuffix",
+    "PhotoURL", "Photos", "VirtualTourURL"
+]
+
+# Free text (not useful, high cardinality)
+LEAKAGE_TEXT = [
+    "PublicRemarks", "PrivateRemarks", "Remarks",
+    "Directions", "ShowingInstructions",
+    "ElementarySchool", "MiddleSchool", "HighSchool"  # can be high-card
+]
+
+# Target-derived features (created from ClosePrice)
+LEAKAGE_TARGET_DERIVED = [
+    "PricePerSqft", "ClosePricePerSqFt", "Price_Per_SqFt",
+    "SalePricePerSqFt"
+]
+
+ALL_LEAKAGE = (LEAKAGE_LIST_FEATURES + LEAKAGE_DATE_FEATURES + 
+               LEAKAGE_IDS + LEAKAGE_TEXT + LEAKAGE_TARGET_DERIVED)
+
+# Case-insensitive matching
+drop_cols = []
+for col in df.columns:
+    if col == target:
+        continue
+    if any(leak.lower() == col.lower() for leak in ALL_LEAKAGE):
+        drop_cols.append(col)
+
+print(f"Dropping {len(drop_cols)} leakage features:")
+for col in sorted(drop_cols):
+    print(f"  - {col}")
+
+X_all = df.drop(columns=[target] + drop_cols).copy()
+
+
+# ===============================
+# 4) TIME-BASED SPLIT (Critical Fix!)
+# ===============================
+print("\n=== Creating Time-Based Train/Test Split ===")
+
+# Find date column for splitting - prioritize actual date columns
+date_candidates = [
+    "CloseDate", "Close Date", "Close_Date", "CLOSEDATE",
+    "CloseOfEscrowDate", "COEDate", "COE",
+    "SaleDate", "Sale Date", "Sale_Date",
+    "Period", "period", "Month", "SaleMonth", "month",
+    "StatusChangeTimestamp", "OnMarketTimestamp"
+]
+
+date_col = None
+for col in date_candidates:
+    if col in df.columns:
+        date_col = col
+        print(f"Found date column: '{date_col}'")
+        # Show sample values
+        sample_vals = df[col].dropna().head(5).tolist()
+        print(f"Sample values: {sample_vals}")
+        break
+
+if date_col is None:
+    print("\n❌ No suitable date column found.")
+    print("Available columns in dataset:")
+    for col in sorted(df.columns):
+        print(f"  - {col}")
+    raise ValueError(
+        "No date/period column found for time-based split. "
+        "Cannot proceed without temporal information."
+    )
+
+print(f"\nUsing date column: '{date_col}'")
+
+# Parse date - handle both full dates and period formats
+print("Attempting to parse dates...")
+
+# For actual date columns (not Period/Month columns)
+if date_col.lower() not in {"period", "month", "salemonth"}:
+    df["_date_sort"] = pd.to_datetime(df[date_col], errors="coerce")
+    valid_count = df["_date_sort"].notna().sum()
+    print(f"✓ Parsed {valid_count} dates as datetime")
+else:
+    # For period/month columns
+    s = df[date_col].astype(str).str.strip()
+    
+    # Try YYYY-MM format first
+    df["_date_sort"] = pd.to_datetime(s, format="%Y-%m", errors="coerce")
+    if df["_date_sort"].isna().all():
+        # Try YYYYMM format
+        s_clean = s.str.replace(r"[^\d]", "", regex=True)
+        df["_date_sort"] = pd.to_datetime(s_clean, format="%Y%m", errors="coerce")
+    
+    valid_count = df["_date_sort"].notna().sum()
+    print(f"✓ Parsed {valid_count} dates from period format")
+
+# Verify parsing worked
+if df["_date_sort"].isna().all():
+    print(f"\n❌ ERROR: Could not parse any dates from column '{date_col}'")
+    print(f"Sample raw values: {df[date_col].head(10).tolist()}")
+    raise ValueError(f"Date parsing failed for column '{date_col}'")
+
+# Remove rows with unparseable dates and keep indices aligned
+valid_date_mask = df["_date_sort"].notna() & y_all.notna()
+valid_indices = valid_date_mask[valid_date_mask].index
+
+# Filter all dataframes using the same indices
+df_dated = df.loc[valid_indices].copy().reset_index(drop=True)
+X_all = X_all.loc[valid_indices].copy().reset_index(drop=True)
+y_all = y_all.loc[valid_indices].copy().reset_index(drop=True)
+
+print(f"\nAfter date filtering: {len(df_dated)} rows")
+
+# Inspect date range in data
+min_date = df_dated["_date_sort"].min()
+max_date = df_dated["_date_sort"].max()
+print(f"Date range: {min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')}")
+
+# Sanity check: dates should be reasonable (between 2020-2030)
+if min_date.year < 2020 or max_date.year > 2030:
+    print(f"\n⚠️  WARNING: Unusual date range detected!")
+    print(f"   Min year: {min_date.year}, Max year: {max_date.year}")
+    print(f"   This suggests the date column may have parsing issues.")
+    print(f"   Original column sample: {df[date_col].head(10).tolist()}")
+
+# Show date distribution by month
+print("\nDate distribution (by month):")
+df_dated["_period"] = df_dated["_date_sort"].dt.to_period('M')
+date_counts = df_dated["_period"].value_counts().sort_index()
+
+# Show all months if <= 24, otherwise show first 12 and last 12
+if len(date_counts) <= 24:
+    for period, count in date_counts.items():
+        print(f"  {period}: {count} rows")
+else:
+    print("  First 12 months:")
+    for period, count in date_counts.head(12).items():
+        print(f"    {period}: {count} rows")
+    print(f"  ... ({len(date_counts) - 24} months omitted) ...")
+    print("  Last 12 months:")
+    for period, count in date_counts.tail(12).items():
+        print(f"    {period}: {count} rows")
+
+# STRATEGY: Train on < Aug 2025, Test on Aug 2025
+# If Aug 2025 doesn't exist, use the last month instead
+TARGET_TEST_MONTH = pd.Period("2025-08", freq='M')
+TRAIN_END = pd.Timestamp("2025-08-01")
+
+# Check if August 2025 exists in data
+df_dated["_period"] = df_dated["_date_sort"].dt.to_period('M')
+has_aug_2025 = (df_dated["_period"] == TARGET_TEST_MONTH).any()
+
+if has_aug_2025:
+    print(f"\n✓ Found August 2025 data - using as test set")
+    train_mask = df_dated["_date_sort"] < TRAIN_END
+    test_mask = df_dated["_period"] == TARGET_TEST_MONTH
+    test_label = "August 2025"
+else:
+    print(f"\n⚠️  No August 2025 data found")
+    print(f"   Using last month as test set instead")
+    
+    unique_months = sorted(df_dated["_period"].unique())
+    if len(unique_months) < 2:
+        raise ValueError("Need at least 2 months of data for time-based split")
+    
+    test_month = unique_months[-1]
+    train_months = unique_months[:-1]
+    
+    train_mask = df_dated["_period"].isin(train_months)
+    test_mask = df_dated["_period"] == test_month
+    test_label = str(test_month)
+
+# Create train/test sets with aligned indices
+X_train = X_all.loc[train_mask].reset_index(drop=True)
+y_train = y_all.loc[train_mask].reset_index(drop=True)
+X_test = X_all.loc[test_mask].reset_index(drop=True)
+y_test = y_all.loc[test_mask].reset_index(drop=True)
+
+print(f"\n🎯 Time-based split:")
+print(f"   Train set: {len(X_train)} rows")
+print(f"   Test set ({test_label}): {len(X_test)} rows")
+
+if len(X_test) == 0:
+    raise ValueError(f"No test data available. Check your date column.")
+
+
+# Optional: Subsample training for speed
+N_SAMPLE = min(len(X_train), 40_000)
+if len(X_train) > N_SAMPLE:
+    samp_idx = X_train.sample(N_SAMPLE, random_state=42).index
+    X_train = X_train.loc[samp_idx].reset_index(drop=True)
+    y_train = y_train.loc[samp_idx].reset_index(drop=True)
+    print(f"Subsampled training to {N_SAMPLE} rows for speed")
+
+
+# Save expected feature schema
+models_path = Path("../models") if Path("../models").exists() else Path("models")
+models_path.mkdir(parents=True, exist_ok=True)
+with open(models_path / "expected_feature_columns.json", "w") as f:
+    json.dump(X_train.columns.tolist(), f, indent=2)
+print(f"\nSaved expected columns → {models_path / 'expected_feature_columns.json'}")
+
+
+# ===================================
+# 5) Column partitions (num / cat)
+# ===================================
+num_cols = X_train.select_dtypes(include=[np.number, "bool"]).columns.tolist()
+cat_cols = X_train.select_dtypes(exclude=[np.number, "bool"]).columns.tolist()
+
+print(f"\nFeature summary: {len(num_cols)} numeric, {len(cat_cols)} categorical")
+
+# For Ridge: only low-cardinality cats
+CARD_LIMIT = 80
+cat_low = [c for c in cat_cols if X_train[c].nunique(dropna=True) <= CARD_LIMIT]
+print(f"Ridge will use {len(cat_low)} low-cardinality categorical features")
+
+
+# ===================================
+# 6) Preprocessors for each model
+# ===================================
+pre_ridge = ColumnTransformer(
+    transformers=[
+        ("num", SimpleImputer(strategy="median"), num_cols),
+        ("cat_low_ohe", Pipeline([
+            ("impute", SimpleImputer(strategy="most_frequent")),
+            ("ohe", OneHotEncoder(handle_unknown="ignore", sparse=True))
+        ]), cat_low),
+    ],
+    remainder="drop"
+)
+
+pre_rf = ColumnTransformer(
+    transformers=[
+        ("num", SimpleImputer(strategy="median"), num_cols),
+        ("cat_ord", Pipeline([
+            ("impute", SimpleImputer(strategy="most_frequent")),
+            ("ord", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1))
+        ]), cat_cols)
+    ],
+    remainder="drop"
+)
+
+
+# ================================
+# 7) Models & randomized tuning
+# ================================
+print("\n=== Training Models ===")
+
+ridge = Ridge(alpha=1.0, random_state=42)
+ridge_search = RandomizedSearchCV(
+    estimator=Pipeline([("prep", pre_ridge), ("model", ridge)]),
+    param_distributions={"model__alpha": loguniform(1e-3, 1e3)},
+    n_iter=10, cv=3, n_jobs=-1,
+    scoring="neg_root_mean_squared_error", random_state=42
+)
+ridge_search.fit(X_train, y_train)
+ridge_tuned = ridge_search.best_estimator_
+print(f"✓ Ridge trained | Best alpha: {ridge_search.best_params_['model__alpha']:.4f}")
+
+rf_search = RandomizedSearchCV(
+    estimator=Pipeline([("prep", pre_rf), ("model", RandomForestRegressor(random_state=42, n_jobs=-1))]),
+    param_distributions={
+        "model__n_estimators": randint(200, 500),
+        "model__max_depth": [None, 18, 30, 40],
+        "model__min_samples_leaf": randint(1, 6),
+        "model__max_features": ["sqrt", "log2", None],
+    },
+    n_iter=15, cv=3, n_jobs=-1,
+    scoring="neg_root_mean_squared_error", random_state=42
+)
+rf_search.fit(X_train, y_train)
+rf_tuned = rf_search.best_estimator_
+print(f"✓ RandomForest trained | Best params: {rf_search.best_params_}")
+
+
+# =====================================
+# 8) Metrics helpers + evaluation
+# =====================================
+def mdape(y_true, y_pred):
+    """Median Absolute Percentage Error in % (robust to outliers)."""
+    y_true = np.asarray(y_true).reshape(-1)
+    y_pred = np.asarray(y_pred).reshape(-1)
+    mask = (y_true != 0) & np.isfinite(y_true) & np.isfinite(y_pred)
+    if not np.any(mask):
+        return np.nan
+    return float(np.median(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
+
+def eval_pipe(name, pipe, X_te, y_te):
+    """Evaluate a fitted pipeline on a test set."""
+    y_pred = pipe.predict(X_te)
+    return {
+        "Model": name,
+        "R2": float(r2_score(y_te, y_pred)),
+        "MAE": float(mean_absolute_error(y_te, y_pred)),
+        "RMSE": float(mean_squared_error(y_te, y_pred, squared=False)),
+        "MdAPE (%)": float(mdape(y_te, y_pred)),
+        "n_test": int(len(y_te)),
+    }
+
+print("\n=== Evaluation on August 2025 Holdout ===")
+ridge_m = eval_pipe("Ridge (tuned)", ridge_tuned, X_test, y_test)
+rf_m = eval_pipe("RandomForest (tuned)", rf_tuned, X_test, y_test)
+
+res_df = pd.DataFrame([ridge_m, rf_m]).sort_values(["R2", "RMSE"], ascending=[False, True])
+
+# Display results
+try:
+    display(res_df.style.format({
+        "R2": "{:.4f}", "MAE": "{:,.0f}", "RMSE": "{:,.0f}", "MdAPE (%)": "{:.2f}"
+    }))
+except Exception:
+    pass
+
+print("\n=== Test Metrics Summary (August 2025 Holdout) ===")
+for row in res_df.to_dict(orient="records"):
+    print(f"{row['Model']}: R²={row['R2']:.4f}, RMSE=${row['RMSE']:,.0f}, "
+          f"MAE=${row['MAE']:,.0f}, MdAPE={row['MdAPE (%)']:.2f}% (n={row['n_test']})")
+
+
+# =========================================
+# 9) Persist results + best model
+# =========================================
+res_df.to_csv(models_path / "baseline_models_results.csv", index=False)
+with open(models_path / "baseline_models_summary.json", "w") as f:
+    json.dump(res_df.to_dict(orient="records"), f, indent=2)
+
+best_row = res_df.iloc[0]
+best_name = best_row["Model"]
+best_pipe = ridge_tuned if "Ridge" in best_name else rf_tuned
+
+joblib.dump(best_pipe, models_path / "best_model.joblib")
+print(f"\n✓ Winner → {best_name}")
+print(f"✓ Saved: {(models_path / 'best_model.joblib').resolve()}")
+
+
+# ==================================================
+# 10) Random Forest internals & feature importance
+# ==================================================
+rf_model = rf_tuned.named_steps["model"]
+print(f"\n=== Random Forest Details ===")
+print(f"Number of trees: {len(rf_model.estimators_)}")
+print(f"Max depth of first tree: {rf_model.estimators_[0].tree_.max_depth}")
+
+# Text representation
+print("\nSample Decision Tree #0 (max_depth=3):")
+print(export_text(rf_model.estimators_[0], max_depth=3))
+
+# Visualize tree
+plt.figure(figsize=(20, 10))
+tree.plot_tree(
+    rf_model.estimators_[0],
+    filled=True, rounded=True,
+    max_depth=3, fontsize=8
+)
+plt.title("Random Forest – Example Decision Tree (Depth ≤ 3)")
+plt.tight_layout()
+plt.show()
+
+# Feature importance
+importances = rf_model.feature_importances_
+rf_pre = rf_tuned.named_steps["prep"]
+
+try:
+    feat_names_out = rf_pre.get_feature_names_out()
+except Exception:
+    feat_names_out = np.array(num_cols + cat_cols)
+
+if len(importances) != len(feat_names_out):
+    print(f"⚠️ Length mismatch: using generic names")
+    feat_names_out = np.array([f"f{i}" for i in range(len(importances))])
+
+sorted_idx = np.argsort(importances)[::-1]
+top_n = min(15, len(importances))
+
+plt.figure(figsize=(9, 6))
+plt.barh(range(top_n), importances[sorted_idx[:top_n]][::-1])
+plt.yticks(range(top_n), feat_names_out[sorted_idx[:top_n]][::-1])
+plt.xlabel("Importance")
+plt.title(f"Top {top_n} Features (Random Forest)")
+plt.tight_layout()
+plt.show()
+
+print("\nTop 10 features:")
+for i in range(min(10, len(importances))):
+    j = sorted_idx[i]
+    print(f"  {feat_names_out[j]:<30} {importances[j]:.4f}")
+
+
+# ==========================
+# 11) Predict API
+# ==========================
+with open(models_path / "expected_feature_columns.json") as f:
+    EXPECTED_COLS = json.load(f)
+
+BEST_MODEL = joblib.load(models_path / "best_model.joblib")
+
+def predict_price(raw_features: dict, model=BEST_MODEL):
+    """Build a single-row DF with expected columns, then predict."""
+    row = {c: raw_features.get(c, np.nan) for c in EXPECTED_COLS}
+    X_new = pd.DataFrame([row], columns=EXPECTED_COLS)
+    return float(model.predict(X_new)[0])
+
+# Example prediction
+example_house = {
+    "BedroomsTotal": 3,
+    "BathroomsFull": 2,
+    "LivingArea": 1600,
+    "LotSizeArea": 5000,
+    "GarageSpaces": 2,
+    "YearBuilt": 1995,
+    "PostalCode": "92618"
+}
+price = predict_price(example_house)
+print(f"\nPredicted Close Price (example): ${price:,.0f}")
+
+print("\n✅ All done! Leakage fixed with time-based split and proper feature removal.")
+
+
+# ==========================================================
+# 12) BONUS: August 2025 Specific Evaluation (if available)
+# ==========================================================
+print("\n" + "="*60)
+print("AUGUST 2025 SPECIFIC EVALUATION")
+print("="*60)
+
+# Reload full dataset to check for August 2025
+df_full = pd.read_csv(csv_path)
+
+# Find date column
+date_col = None
+for col in date_candidates:
+    if col in df_full.columns:
+        date_col = col
+        break
+
+if date_col is not None:
+    # Parse date
+    if date_col.lower() in {"period", "month", "salemonth"}:
+        df_full["_parsed_date"] = df_full[date_col].astype(str).str.replace(r"[^\d]", "", regex=True)
+        df_full["_date_sort"] = pd.to_datetime(df_full["_parsed_date"], format="%Y%m", errors="coerce")
+    else:
+        df_full["_date_sort"] = pd.to_datetime(df_full[date_col], errors="coerce")
+    
+    # Filter for August 2025
+    df_full["_period"] = df_full["_date_sort"].dt.to_period('M')
+    aug_2025_mask = df_full["_period"] == pd.Period("2025-08", freq='M')
+    
+    if aug_2025_mask.sum() > 0:
+        print(f"✓ Found {aug_2025_mask.sum()} August 2025 transactions")
+        
+        df_aug = df_full.loc[aug_2025_mask].copy()
+        
+        # Extract target
+        y_aug_raw = pd.to_numeric(df_aug[target], errors="coerce")
+        
+        # Build feature matrix with expected columns
+        X_aug = pd.DataFrame({c: df_aug.get(c, np.nan) for c in EXPECTED_COLS})
+        
+        # Keep only valid targets
+        valid_mask = y_aug_raw.notna()
+        X_aug = X_aug.loc[valid_mask].reset_index(drop=True)
+        y_aug = y_aug_raw.loc[valid_mask].reset_index(drop=True)
+        
+        if len(y_aug) > 0:
+            print(f"✓ {len(y_aug)} valid transactions for evaluation")
+            
+            # Predict
+            y_aug_pred = BEST_MODEL.predict(X_aug)
+            
+            # Calculate metrics
+            r2_aug = r2_score(y_aug, y_aug_pred)
+            mae_aug = mean_absolute_error(y_aug, y_aug_pred)
+            rmse_aug = mean_squared_error(y_aug, y_aug_pred, squared=False)
+            mdape_aug = mdape(y_aug, y_aug_pred)
+            
+            print("\n📊 August 2025 Performance:")
+            print(f"   R²:    {r2_aug:.4f}")
+            print(f"   MAE:   ${mae_aug:,.0f}")
+            print(f"   RMSE:  ${rmse_aug:,.0f}")
+            print(f"   MdAPE: {mdape_aug:.2f}%")
+            print(f"   n:     {len(y_aug)} transactions")
+            
+            # Save August 2025 specific results
+            aug_results = {
+                "month": "2025-08",
+                "n_transactions": int(len(y_aug)),
+                "R2": float(r2_aug),
+                "MAE": float(mae_aug),
+                "RMSE": float(rmse_aug),
+                "MdAPE": float(mdape_aug)
+            }
+            
+            with open(models_path / "august_2025_evaluation.json", "w") as f:
+                json.dump(aug_results, f, indent=2)
+            
+            print(f"\n✓ Saved August 2025 results → {models_path / 'august_2025_evaluation.json'}")
+        else:
+            print("⚠️  No valid target values for August 2025")
+    else:
+        print("ℹ️  No August 2025 data found in dataset")
+        print("   Skipping August-specific evaluation")
+else:
+    print("ℹ️  No date column found - skipping August 2025 evaluation")
+
+print("="*60)
