@@ -31,18 +31,18 @@ from sklearn import tree
 from sklearn.tree import export_text
 
 
-# =========================
+# ====================================================================================================
 # 1) Load the cleaned data
-# =========================
+# ====================================================================================================
 csv_path = "../data/cleaned_enhanced.csv" if Path("../data/cleaned_enhanced.csv").exists() else "data/cleaned_enhanced.csv"
 df = pd.read_csv(csv_path)
 
 print(f"Original dataset shape: {df.shape}")
 
 
-# ===============================
+# ==========================================================================================================
 # 2) Resolve target column
-# ===============================
+# ==========================================================================================================
 target_candidates = ["ClosePrice", "Close Price", "Close_Price", "CLOSEPRICE"]
 target = next((c for c in target_candidates if c in df.columns), None)
 assert target is not None, "Target column not found in cleaned_enhanced.csv"
@@ -50,9 +50,9 @@ assert target is not None, "Target column not found in cleaned_enhanced.csv"
 y_all = pd.to_numeric(df[target], errors="coerce")
 
 
-# ===============================
+# ==========================================================================================================
 # 3) CRITICAL: Remove leakage features FIRST
-# ===============================
+# ==========================================================================================================
 print("\n=== Removing Leakage Features ===")
 
 # List-related leakage (directly correlated with close price)
@@ -115,9 +115,9 @@ for col in sorted(drop_cols):
 X_all = df.drop(columns=[target] + drop_cols).copy()
 
 
-# ===============================
+# ==========================================================================================================
 # 4) TIME-BASED SPLIT (Critical Fix!)
-# ===============================
+# ==========================================================================================================
 print("\n=== Creating Time-Based Train/Test Split ===")
 
 # Find date column for splitting - prioritize actual date columns
@@ -140,7 +140,7 @@ for col in date_candidates:
         break
 
 if date_col is None:
-    print("\n❌ No suitable date column found.")
+    print("\nNo suitable date column found.")
     print("Available columns in dataset:")
     for col in sorted(df.columns):
         print(f"  - {col}")
@@ -158,7 +158,7 @@ print("Attempting to parse dates...")
 if date_col.lower() not in {"period", "month", "salemonth"}:
     df["_date_sort"] = pd.to_datetime(df[date_col], errors="coerce")
     valid_count = df["_date_sort"].notna().sum()
-    print(f"✓ Parsed {valid_count} dates as datetime")
+    print(f"Parsed {valid_count} dates as datetime")
 else:
     # For period/month columns
     s = df[date_col].astype(str).str.strip()
@@ -171,11 +171,11 @@ else:
         df["_date_sort"] = pd.to_datetime(s_clean, format="%Y%m", errors="coerce")
     
     valid_count = df["_date_sort"].notna().sum()
-    print(f"✓ Parsed {valid_count} dates from period format")
+    print(f"Parsed {valid_count} dates from period format")
 
 # Verify parsing worked
 if df["_date_sort"].isna().all():
-    print(f"\n❌ ERROR: Could not parse any dates from column '{date_col}'")
+    print(f"\nERROR: Could not parse any dates from column '{date_col}'")
     print(f"Sample raw values: {df[date_col].head(10).tolist()}")
     raise ValueError(f"Date parsing failed for column '{date_col}'")
 
@@ -197,10 +197,10 @@ print(f"Date range: {min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m
 
 # Sanity check: dates should be reasonable (between 2020-2030)
 if min_date.year < 2020 or max_date.year > 2030:
-    print(f"\n⚠️  WARNING: Unusual date range detected!")
-    print(f"   Min year: {min_date.year}, Max year: {max_date.year}")
-    print(f"   This suggests the date column may have parsing issues.")
-    print(f"   Original column sample: {df[date_col].head(10).tolist()}")
+    print(f"\nWARNING: Unusual date range detected!")
+    print(f"Min year: {min_date.year}, Max year: {max_date.year}")
+    print(f"This suggests the date column may have parsing issues.")
+    print(f"Original column sample: {df[date_col].head(10).tolist()}")
 
 # Show date distribution by month
 print("\nDate distribution (by month):")
@@ -230,13 +230,13 @@ df_dated["_period"] = df_dated["_date_sort"].dt.to_period('M')
 has_aug_2025 = (df_dated["_period"] == TARGET_TEST_MONTH).any()
 
 if has_aug_2025:
-    print(f"\n✓ Found August 2025 data - using as test set")
+    print(f"\nFound August 2025 data - using as test set")
     train_mask = df_dated["_date_sort"] < TRAIN_END
     test_mask = df_dated["_period"] == TARGET_TEST_MONTH
     test_label = "August 2025"
 else:
-    print(f"\n⚠️  No August 2025 data found")
-    print(f"   Using last month as test set instead")
+    print(f"\nNo August 2025 data found")
+    print(f"Using last month as test set instead")
     
     unique_months = sorted(df_dated["_period"].unique())
     if len(unique_months) < 2:
@@ -255,9 +255,9 @@ y_train = y_all.loc[train_mask].reset_index(drop=True)
 X_test = X_all.loc[test_mask].reset_index(drop=True)
 y_test = y_all.loc[test_mask].reset_index(drop=True)
 
-print(f"\n🎯 Time-based split:")
-print(f"   Train set: {len(X_train)} rows")
-print(f"   Test set ({test_label}): {len(X_test)} rows")
+print(f"\nTime-based split:")
+print(f"Train set: {len(X_train)} rows")
+print(f"Test set ({test_label}): {len(X_test)} rows")
 
 if len(X_test) == 0:
     raise ValueError(f"No test data available. Check your date column.")
@@ -280,9 +280,9 @@ with open(models_path / "expected_feature_columns.json", "w") as f:
 print(f"\nSaved expected columns → {models_path / 'expected_feature_columns.json'}")
 
 
-# ===================================
+# ==============================================================================================================
 # 5) Column partitions (num / cat)
-# ===================================
+# ==============================================================================================================
 num_cols = X_train.select_dtypes(include=[np.number, "bool"]).columns.tolist()
 cat_cols = X_train.select_dtypes(exclude=[np.number, "bool"]).columns.tolist()
 
@@ -294,9 +294,9 @@ cat_low = [c for c in cat_cols if X_train[c].nunique(dropna=True) <= CARD_LIMIT]
 print(f"Ridge will use {len(cat_low)} low-cardinality categorical features")
 
 
-# ===================================
+# ==============================================================================================================
 # 6) Preprocessors for each model
-# ===================================
+# ==============================================================================================================
 pre_ridge = ColumnTransformer(
     transformers=[
         ("num", SimpleImputer(strategy="median"), num_cols),
@@ -320,9 +320,9 @@ pre_rf = ColumnTransformer(
 )
 
 
-# ================================
+# ===========================================================================================================
 # 7) Models & randomized tuning
-# ================================
+# ===========================================================================================================
 print("\n=== Training Models ===")
 
 ridge = Ridge(alpha=1.0, random_state=42)
@@ -334,7 +334,7 @@ ridge_search = RandomizedSearchCV(
 )
 ridge_search.fit(X_train, y_train)
 ridge_tuned = ridge_search.best_estimator_
-print(f"✓ Ridge trained | Best alpha: {ridge_search.best_params_['model__alpha']:.4f}")
+print(f"Ridge trained | Best alpha: {ridge_search.best_params_['model__alpha']:.4f}")
 
 rf_search = RandomizedSearchCV(
     estimator=Pipeline([("prep", pre_rf), ("model", RandomForestRegressor(random_state=42, n_jobs=-1))]),
@@ -349,12 +349,12 @@ rf_search = RandomizedSearchCV(
 )
 rf_search.fit(X_train, y_train)
 rf_tuned = rf_search.best_estimator_
-print(f"✓ RandomForest trained | Best params: {rf_search.best_params_}")
+print(f"RandomForest trained | Best params: {rf_search.best_params_}")
 
 
-# =====================================
+# ================================================================================================================
 # 8) Metrics helpers + evaluation
-# =====================================
+# ================================================================================================================
 def mdape(y_true, y_pred):
     """Median Absolute Percentage Error in % (robust to outliers)."""
     y_true = np.asarray(y_true).reshape(-1)
@@ -396,9 +396,9 @@ for row in res_df.to_dict(orient="records"):
           f"MAE=${row['MAE']:,.0f}, MdAPE={row['MdAPE (%)']:.2f}% (n={row['n_test']})")
 
 
-# =========================================
+# ====================================================================================================================
 # 9) Persist results + best model
-# =========================================
+# ====================================================================================================================
 res_df.to_csv(models_path / "baseline_models_results.csv", index=False)
 with open(models_path / "baseline_models_summary.json", "w") as f:
     json.dump(res_df.to_dict(orient="records"), f, indent=2)
@@ -408,13 +408,13 @@ best_name = best_row["Model"]
 best_pipe = ridge_tuned if "Ridge" in best_name else rf_tuned
 
 joblib.dump(best_pipe, models_path / "best_model.joblib")
-print(f"\n✓ Winner → {best_name}")
-print(f"✓ Saved: {(models_path / 'best_model.joblib').resolve()}")
+print(f"\nWinner → {best_name}")
+print(f"Saved: {(models_path / 'best_model.joblib').resolve()}")
 
 
-# ==================================================
+# ====================================================================================================
 # 10) Random Forest internals & feature importance
-# ==================================================
+# ====================================================================================================
 rf_model = rf_tuned.named_steps["model"]
 print(f"\n=== Random Forest Details ===")
 print(f"Number of trees: {len(rf_model.estimators_)}")
@@ -445,7 +445,7 @@ except Exception:
     feat_names_out = np.array(num_cols + cat_cols)
 
 if len(importances) != len(feat_names_out):
-    print(f"⚠️ Length mismatch: using generic names")
+    print(f"Length mismatch: using generic names")
     feat_names_out = np.array([f"f{i}" for i in range(len(importances))])
 
 sorted_idx = np.argsort(importances)[::-1]
@@ -465,9 +465,9 @@ for i in range(min(10, len(importances))):
     print(f"  {feat_names_out[j]:<30} {importances[j]:.4f}")
 
 
-# ==========================
+# =====================================================================================================
 # 11) Predict API
-# ==========================
+# =====================================================================================================
 with open(models_path / "expected_feature_columns.json") as f:
     EXPECTED_COLS = json.load(f)
 
@@ -492,12 +492,12 @@ example_house = {
 price = predict_price(example_house)
 print(f"\nPredicted Close Price (example): ${price:,.0f}")
 
-print("\n✅ All done! Leakage fixed with time-based split and proper feature removal.")
+print("\nAll done! Leakage fixed with time-based split and proper feature removal.")
 
 
-# ==========================================================
+# ============================================================================================================
 # 12) BONUS: August 2025 Specific Evaluation (if available)
-# ==========================================================
+# ============================================================================================================
 print("\n" + "="*60)
 print("AUGUST 2025 SPECIFIC EVALUATION")
 print("="*60)
@@ -525,7 +525,7 @@ if date_col is not None:
     aug_2025_mask = df_full["_period"] == pd.Period("2025-08", freq='M')
     
     if aug_2025_mask.sum() > 0:
-        print(f"✓ Found {aug_2025_mask.sum()} August 2025 transactions")
+        print(f"Found {aug_2025_mask.sum()} August 2025 transactions")
         
         df_aug = df_full.loc[aug_2025_mask].copy()
         
@@ -541,7 +541,7 @@ if date_col is not None:
         y_aug = y_aug_raw.loc[valid_mask].reset_index(drop=True)
         
         if len(y_aug) > 0:
-            print(f"✓ {len(y_aug)} valid transactions for evaluation")
+            print(f"{len(y_aug)} valid transactions for evaluation")
             
             # Predict
             y_aug_pred = BEST_MODEL.predict(X_aug)
@@ -553,11 +553,11 @@ if date_col is not None:
             mdape_aug = mdape(y_aug, y_aug_pred)
             
             print("\n📊 August 2025 Performance:")
-            print(f"   R²:    {r2_aug:.4f}")
-            print(f"   MAE:   ${mae_aug:,.0f}")
-            print(f"   RMSE:  ${rmse_aug:,.0f}")
-            print(f"   MdAPE: {mdape_aug:.2f}%")
-            print(f"   n:     {len(y_aug)} transactions")
+            print(f"R²: {r2_aug:.4f}")
+            print(f"MAE: ${mae_aug:,.0f}")
+            print(f"RMSE: ${rmse_aug:,.0f}")
+            print(f"MdAPE: {mdape_aug:.2f}%")
+            print(f"n: {len(y_aug)} transactions")
             
             # Save August 2025 specific results
             aug_results = {
@@ -572,13 +572,13 @@ if date_col is not None:
             with open(models_path / "august_2025_evaluation.json", "w") as f:
                 json.dump(aug_results, f, indent=2)
             
-            print(f"\n✓ Saved August 2025 results → {models_path / 'august_2025_evaluation.json'}")
+            print(f"\nSaved August 2025 results → {models_path / 'august_2025_evaluation.json'}")
         else:
-            print("⚠️  No valid target values for August 2025")
+            print("No valid target values for August 2025")
     else:
-        print("ℹ️  No August 2025 data found in dataset")
-        print("   Skipping August-specific evaluation")
+        print("No August 2025 data found in dataset")
+        print("Skipping August-specific evaluation")
 else:
-    print("ℹ️  No date column found - skipping August 2025 evaluation")
+    print("No date column found - skipping August 2025 evaluation")
 
 print("="*60)
