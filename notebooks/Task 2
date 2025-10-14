@@ -653,3 +653,99 @@ else:
     print("No date column found - skipping August 2025 evaluation")
 
 print("="*60)
+
+
+# ============================================================================================================
+# 14) September 2025 Specific Evaluation (if available)
+# ============================================================================================================
+print("\n" + "="*60)
+print("SEPTEMBER 2025 SPECIFIC EVALUATION")
+print("="*60)
+
+# Check for September 2025 data
+if date_col is not None and "_date_sort" in df_full.columns:
+    # Filter for September 2025
+    sep_2025_mask = df_full["_period"] == pd.Period("2025-09", freq='M')
+    
+    if sep_2025_mask.sum() > 0:
+        print(f"Found {sep_2025_mask.sum()} September 2025 transactions")
+        
+        df_sep = df_full.loc[sep_2025_mask].copy()
+        
+        # Extract target
+        y_sep_raw = pd.to_numeric(df_sep[target], errors="coerce")
+        
+        # Build feature matrix with expected columns
+        X_sep = pd.DataFrame({c: df_sep.get(c, np.nan) for c in EXPECTED_COLS})
+        
+        # Keep only valid targets
+        valid_mask = y_sep_raw.notna()
+        X_sep = X_sep.loc[valid_mask].reset_index(drop=True)
+        y_sep = y_sep_raw.loc[valid_mask].reset_index(drop=True)
+        
+        if len(y_sep) > 0:
+            print(f"{len(y_sep)} valid transactions for evaluation")
+            
+            # Predict
+            y_sep_pred = BEST_MODEL.predict(X_sep)
+            
+            # Calculate metrics
+            r2_sep = r2_score(y_sep, y_sep_pred)
+            mae_sep = mean_absolute_error(y_sep, y_sep_pred)
+            rmse_sep = mean_squared_error(y_sep, y_sep_pred, squared=False)
+            mdape_sep = mdape(y_sep, y_sep_pred)
+            
+            print("\nSeptember 2025 Performance:")
+            print(f"R²: {r2_sep:.4f}")
+            print(f"MAE: ${mae_sep:,.0f}")
+            print(f"RMSE: ${rmse_sep:,.0f}")
+            print(f"MdAPE: {mdape_sep:.2f}%")
+            print(f"n: {len(y_sep)} transactions")
+            
+            # Save September 2025 specific results
+            sep_results = {
+                "month": "2025-09",
+                "n_transactions": int(len(y_sep)),
+                "R2": float(r2_sep),
+                "MAE": float(mae_sep),
+                "RMSE": float(rmse_sep),
+                "MdAPE": float(mdape_sep)
+            }
+            
+            with open(models_path / "september_2025_evaluation.json", "w") as f:
+                json.dump(sep_results, f, indent=2)
+            
+            print(f"\nSaved September 2025 results → {models_path / 'september_2025_evaluation.json'}")
+            
+            # Compare August vs September if both available
+            if (models_path / "august_2025_evaluation.json").exists():
+                print("\n" + "="*60)
+                print("AUGUST vs SEPTEMBER 2025 COMPARISON")
+                print("="*60)
+                
+                with open(models_path / "august_2025_evaluation.json") as f:
+                    aug_results = json.load(f)
+                
+                comparison = pd.DataFrame([aug_results, sep_results])
+                comparison = comparison.set_index('month')
+                
+                print("\nPerformance Comparison:")
+                print(comparison.to_string())
+                
+                # Calculate deltas
+                print("\nMonth-over-Month Changes:")
+                print(f"R² change: {sep_results['R2'] - aug_results['R2']:+.4f}")
+                print(f"MAE change: ${sep_results['MAE'] - aug_results['MAE']:+,.0f}")
+                print(f"RMSE change: ${sep_results['RMSE'] - aug_results['RMSE']:+,.0f}")
+                print(f"MdAPE change: {sep_results['MdAPE'] - aug_results['MdAPE']:+.2f}%")
+                print(f"Transaction count change: {sep_results['n_transactions'] - aug_results['n_transactions']:+,d}")
+                
+        else:
+            print("No valid target values for September 2025")
+    else:
+        print("No September 2025 data found in dataset")
+        print("Skipping September-specific evaluation")
+else:
+    print("Date column not available - skipping September 2025 evaluation")
+
+print("="*60)
