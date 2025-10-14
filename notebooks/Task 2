@@ -6,7 +6,7 @@
 # 2. Explicit removal of ListPrice and derived features
 # 3. Removal of high-cardinality identifiers
 # 4. Proper temporal holdout for August 2025
-# 5. DROP top 0.5% and bottom 0.5% of ClosePrice from TEST SET
+# 5. DROP top 0.5% and bottom 0.5% of ClosePrice from BOTH TRAIN and TEST SET 
 # ====================================================================================================
 
 import warnings, json, math
@@ -251,45 +251,76 @@ else:
     test_label = str(test_month)
 
 # Create train/test sets with aligned indices
-X_train = X_all.loc[train_mask].reset_index(drop=True)
-y_train = y_all.loc[train_mask].reset_index(drop=True)
+X_train_raw = X_all.loc[train_mask].reset_index(drop=True)
+y_train_raw = y_all.loc[train_mask].reset_index(drop=True)
 X_test_raw = X_all.loc[test_mask].reset_index(drop=True)
 y_test_raw = y_all.loc[test_mask].reset_index(drop=True)
 
 print(f"\nTime-based split:")
-print(f"Train set: {len(X_train)} rows")
+print(f"Train set: {len(X_train_raw)} rows")
 print(f"Test set ({test_label}): {len(X_test_raw)} rows")
 
 # ==========================================================================================================
-# 5) REMOVE TOP 0.5% AND BOTTOM 0.5% FROM TEST SET
+# 5) REMOVE TOP 0.5% AND BOTTOM 0.5% FROM **BOTH** TRAIN AND TEST SETS
 # ==========================================================================================================
-print("\n=== Removing Test Set Outliers (Top/Bottom 0.5%) ===")
+print("\n" + "="*80)
+print("REMOVING OUTLIERS: Top/Bottom 0.5% of ClosePrice from TRAIN and TEST")
+print("="*80)
 
-# Calculate percentiles on TEST SET ONLY
-p_low = np.percentile(y_test_raw, 0.5)
-p_high = np.percentile(y_test_raw, 99.5)
+# --- TRAIN SET OUTLIER REMOVAL ---
+print("\n--- Training Set Outlier Removal ---")
+p_low_train = np.percentile(y_train_raw, 0.5)
+p_high_train = np.percentile(y_train_raw, 99.5)
 
-print(f"Test set ClosePrice range before filtering:")
+print(f"Train ClosePrice range BEFORE filtering:")
+print(f"Min: ${y_train_raw.min():,.0f}")
+print(f"0.5th percentile: ${p_low_train:,.0f}")
+print(f"99.5th percentile: ${p_high_train:,.0f}")
+print(f"Max: ${y_train_raw.max():,.0f}")
+
+train_keep_mask = (y_train_raw >= p_low_train) & (y_train_raw <= p_high_train)
+n_removed_train = (~train_keep_mask).sum()
+
+X_train = X_train_raw.loc[train_keep_mask].reset_index(drop=True)
+y_train = y_train_raw.loc[train_keep_mask].reset_index(drop=True)
+
+print(f"\nRemoved {n_removed_train} outliers from training set ({n_removed_train/len(y_train_raw)*100:.2f}%)")
+print(f"Final training set size: {len(y_train)} rows")
+print(f"Train ClosePrice range AFTER filtering:")
+print(f"Min: ${y_train.min():,.0f}")
+print(f"Max: ${y_train.max():,.0f}")
+
+# --- TEST SET OUTLIER REMOVAL ---
+print("\n--- Test Set Outlier Removal ---")
+p_low_test = np.percentile(y_test_raw, 0.5)
+p_high_test = np.percentile(y_test_raw, 99.5)
+
+print(f"Test ClosePrice range BEFORE filtering:")
 print(f"Min: ${y_test_raw.min():,.0f}")
-print(f"0.5th percentile: ${p_low:,.0f}")
-print(f"99.5th percentile: ${p_high:,.0f}")
+print(f"0.5th percentile: ${p_low_test:,.0f}")
+print(f"99.5th percentile: ${p_high_test:,.0f}")
 print(f"Max: ${y_test_raw.max():,.0f}")
 
-# Filter test set
-test_keep_mask = (y_test_raw >= p_low) & (y_test_raw <= p_high)
-n_removed = (~test_keep_mask).sum()
+test_keep_mask = (y_test_raw >= p_low_test) & (y_test_raw <= p_high_test)
+n_removed_test = (~test_keep_mask).sum()
 
 X_test = X_test_raw.loc[test_keep_mask].reset_index(drop=True)
 y_test = y_test_raw.loc[test_keep_mask].reset_index(drop=True)
 
-print(f"\nRemoved {n_removed} outliers from test set ({n_removed/len(y_test_raw)*100:.2f}%)")
-print(f"Final test set size: {len(y_test_raw)} rows")
-print(f"Test set ClosePrice range after filtering:")
+print(f"\nRemoved {n_removed_test} outliers from test set ({n_removed_test/len(y_test_raw)*100:.2f}%)")
+print(f"Final test set size: {len(y_test)} rows")
+print(f"Test ClosePrice range AFTER filtering:")
 print(f"Min: ${y_test.min():,.0f}")
 print(f"Max: ${y_test.max():,.0f}")
 
-if len(X_test) == 0:
-    raise ValueError(f"No test data remaining after outlier removal!")
+print("\n" + "="*80)
+print(f"SUMMARY: Removed {n_removed_train + n_removed_test} total outliers")
+print(f"Training: {len(y_train)} rows (removed {n_removed_train})")
+print(f"Test: {len(y_test)} rows (removed {n_removed_test})")
+print("="*80)
+
+if len(X_train) == 0 or len(X_test) == 0:
+    raise ValueError("No data remaining after outlier removal!")
 
 
 # Subsample training for speed
